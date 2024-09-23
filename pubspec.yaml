@@ -1,0 +1,20 @@
+name: live_cache
+description: "A cache that comes in handy for an offline-first setup."
+version: 0.1.0
+repository: https://github.com/martinsellergren/live_cache
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.12
+  freezed: ^2.5.7
+  json_serializable: ^6.8.0
+
+dependencies:
+  collection: ^1.18.0
+  freezed_annotation: ^2.4.4
+  json_annotation: ^4.9.0
+  rxdart: ^0.28.0
+  yet_another_state_holder: ^0.2.0

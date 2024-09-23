@@ -1,0 +1,1 @@
+A cache that comes in handy for an offline-first setup.
