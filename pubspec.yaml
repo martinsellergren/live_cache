@@ -1,6 +1,6 @@
 name: live_cache
 description: "A cache that comes in handy for an offline-first setup."
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/martinsellergren/live_cache
 
 environment:
