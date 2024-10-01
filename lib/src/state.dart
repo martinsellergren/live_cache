@@ -1,12 +1,22 @@
-import 'package:freezed_annotation/freezed_annotation.dart';
+import 'package:meta/meta.dart';
 
-part 'state.freezed.dart';
+@immutable
+class CacheState<Item extends Object, Mod extends Object> {
+  final Map<String, Item> rawCache;
+  final Mod? lastMod;
+  final List<Mod> ephemeralMods;
 
-@freezed
-class CacheState<Item, Mod> with _$CacheState<Item, Mod> {
-  const factory CacheState({
-    @Default({}) Map<String, Item> cache,
+  const CacheState(
+      {this.rawCache = const {}, this.lastMod, this.ephemeralMods = const []});
+
+  CacheState<Item, Mod> copyWith({
+    Map<String, Item>? rawCache,
     Mod? lastMod,
-    @Default([]) List<Mod> ephemeralMods,
-  }) = _CacheState<Item, Mod>;
+    List<Mod>? ephemeralMods,
+  }) =>
+      CacheState(
+        rawCache: rawCache ?? this.rawCache,
+        lastMod: lastMod ?? this.lastMod,
+        ephemeralMods: ephemeralMods ?? this.ephemeralMods,
+      );
 }

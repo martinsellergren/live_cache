@@ -1,72 +1,91 @@
+import 'dart:async';
+
 import 'package:collection/collection.dart';
 import 'package:rxdart/rxdart.dart';
-import 'package:yet_another_state_holder/yet_another_state_holder.dart';
 
 import 'state.dart';
 
 typedef ModConfig<Item extends Object, Mod extends Object> = ({
-  Item? Function(Mod mod, Item item, GetItem<Item> getItem) modifyItem,
-  List<Item> Function(Mod mod, GetItem<Item> getItem) newModItems,
+  Item? Function(
+    Item item,
+    Mod mod,
+    Map<String, Item> cache,
+  ) modifyItem,
+  List<Item> Function(
+    Mod mod,
+    Map<String, Item> cache,
+  ) newModItems,
 });
 
 typedef Finalizer<Item extends Object, Mod extends Object> = ({
-  Item Function({
-    required Item cacheItem,
-    required Map<String, Item> incomings,
-  }) incoming,
-  Item Function({
-    required Item outgoingItem,
-    required Map<String, Item> cache,
-  }) outgoing,
+  List<Item> Function(
+    Item incomingItem,
+  ) incoming,
+  Item Function(
+    Item outgoingItem,
+    Map<String, Item> cache,
+  ) outgoing,
 });
 
-typedef GetItem<Item extends Object> = T? Function<T extends Item>(String id);
+class LiveCache<Item extends Object, Mod extends Object> {
+  var _state = CacheState<Item, Mod>();
+  final _ctrl = StreamController<CacheState<Item, Mod>>.broadcast();
 
-class LiveCache<Item extends Object, Mod extends Object>
-    extends StateHolder<CacheState<Item, Mod>> {
   final String Function(Item e) itemId;
   final ModConfig<Item, Mod> modConfig;
-  final Finalizer<Item, Mod> finalizer;
+  final Finalizer<Item, Mod>? finalizer;
 
   LiveCache({
     required this.itemId,
     required this.modConfig,
-    required this.finalizer,
-  }) : super(CacheState());
+    this.finalizer,
+  });
 
-  void overwrite(Map<String, Item> cache) {
-    state = state.copyWith(cache: cache);
+  void dispose() {
+    _ctrl.close();
   }
+
+  void _emit(CacheState<Item, Mod> state) {
+    _state = state;
+    _ctrl.add(state);
+  }
+
+  /// Without ephemeral mods and finalizer
+  Map<String, Item> get rawState => _state.rawCache;
+
+  set rawState(Map<String, Item> cache) =>
+      _emit(_state.copyWith(rawCache: cache));
+
+  /// With ephemeral mods and finalizer
+  Map<String, Item> get effectiveState => _state.effectiveCache(
+      itemId: itemId, modConfig: modConfig, finalizer: finalizer);
 
   Stream<List<T>> addAndObserveMany<T extends Item>(
       Future<List<T>> Function() fetchItems) async* {
     final List<Mod> missedMods = [];
+    final cache0 = _state.rawCache;
     final sub = _modsStream.listen((e) => missedMods.add(e));
     List<T> res = await fetchItems();
     sub.cancel();
-    res = modConfig
-        .applyMods(items: res, mods: missedMods, getItem: getItem)
-        .whereType<T>()
-        .toList();
-    final resMap = {for (final e in res) itemId(e): e};
-    state = state.copyWith(
-      cache: {
-        ...state.cache,
-        for (final e in res) itemId(e): e,
-      }.map(
-        (key, e) => MapEntry(
-          key,
-          finalizer.incoming(cacheItem: e, incomings: resMap),
-        ),
-      ),
-    );
-    yield* startedStream
-        .map((e) => res.map((e) => state.cache[itemId(e)]).nonNulls.toList())
-        .map((e) => modConfig.applyMods(
-            items: e, mods: state.ephemeralMods, getItem: getItem))
-        .map((e) => e
-            .map((e) => finalizer.outgoing(outgoingItem: e, cache: state.cache))
-            .toList())
+    var newCacheItems = res
+        .map((e) => finalizer?.incoming(e) ?? [e])
+        .expand((e) => e)
+        .modifyItemsRetroactively(
+          cache0: cache0,
+          missedMods: missedMods,
+          itemId: itemId,
+          modConfig: modConfig,
+        );
+    _emit(_state.copyWith(
+      rawCache: {
+        ..._state.rawCache,
+        for (final e in newCacheItems) itemId(e): e,
+      },
+    ));
+    yield* _ctrl.stream
+        .startWith(_state)
+        .map((state) =>
+            res.map((e) => effectiveState[itemId(e)]).nonNulls.toList())
         .map((e) => e.whereType<T>().toList())
         .distinct(const ListEquality().equals);
   }
@@ -82,59 +101,86 @@ class LiveCache<Item extends Object, Mod extends Object>
   }
 
   Stream<Mod> get _modsStream =>
-      stream.map((e) => e.lastMod).distinct().whereNotNull();
-
-  T? getItem<T extends Item>(String id) {
-    final item = state.cache[id];
-    return item == null
-        ? null
-        : finalizer.outgoing(outgoingItem: item, cache: state.cache) as T;
-  }
-
-  List<T> getAllItemsOfType<T extends Item>() {
-    return state.cache.values
-        .map((e) => finalizer.outgoing(outgoingItem: e, cache: state.cache))
-        .whereType<T>()
-        .toList();
-  }
+      _ctrl.stream.map((e) => e.lastMod).distinct().whereNotNull();
 
   void modify(Mod mod) {
-    state = state.copyWith(cache: {
-      for (final e in modConfig.applyMod(
-          items: state.cache.values, mod: mod, getItem: getItem))
-        itemId(e): e,
-    });
+    _emit(_state.copyWith(
+      lastMod: mod,
+      rawCache: _state.rawCache.withMod(
+        itemId: itemId,
+        modConfig: modConfig,
+        mod: mod,
+      ),
+    ));
   }
 
   void addEphemeralMod(Mod mod) {
-    state =
-        state.copyWith(ephemeralMods: state.ephemeralMods.toList()..add(mod));
+    _emit(_state.copyWith(
+      ephemeralMods: [..._state.ephemeralMods, mod],
+    ));
   }
 
   void removeEphemeralMod(Mod mod) {
-    state = state.copyWith(
-        ephemeralMods: state.ephemeralMods.toList()..remove(mod));
+    _emit(_state.copyWith(
+      ephemeralMods: _state.ephemeralMods.whereNot((e) => e == mod).toList(),
+    ));
   }
 }
 
-extension<Item extends Object, Mod extends Object> on ModConfig<Item, Mod> {
-  Iterable<Item> applyMod({
-    required Mod mod,
-    required Iterable<Item> items,
-    required GetItem<Item> getItem,
+extension<Item extends Object, Mod extends Object> on CacheState<Item, Mod> {
+  Map<String, Item> effectiveCache({
+    required String Function(Item e) itemId,
+    required ModConfig<Item, Mod> modConfig,
+    required Finalizer<Item, Mod>? finalizer,
   }) {
-    return [
-      ...items.map((e) => this.modifyItem(mod, e, getItem)).nonNulls,
-      ...this.newModItems(mod, getItem),
-    ];
+    final cache1 = rawCache.withMods(
+        itemId: itemId, modConfig: modConfig, mods: ephemeralMods);
+    return cache1.map(
+      (key, value) => MapEntry(
+        key,
+        finalizer?.outgoing(value, cache1) ?? value,
+      ),
+    );
   }
+}
 
-  Iterable<Item> applyMods({
+extension<Item extends Object> on Map<String, Item> {
+  Map<String, Item> withMods<Mod extends Object>({
+    required String Function(Item e) itemId,
+    required ModConfig<Item, Mod> modConfig,
     required List<Mod> mods,
-    required Iterable<Item> items,
-    required GetItem<Item> getItem,
+  }) =>
+      mods.fold(
+        this,
+        (prev, e) => prev.withMod(modConfig: modConfig, itemId: itemId, mod: e),
+      );
+
+  Map<String, Item> withMod<Mod extends Object>({
+    required ModConfig<Item, Mod> modConfig,
+    required String Function(Item e) itemId,
+    required Mod mod,
   }) {
-    return mods.fold(
-        items, (prev, e) => applyMod(items: prev, mod: e, getItem: getItem));
+    final existing =
+        values.map((e) => modConfig.modifyItem(e, mod, this)).nonNulls;
+    final nws = modConfig.newModItems(mod, this);
+    return {
+      for (final e in existing) itemId(e): e,
+      for (final e in nws) itemId(e): e,
+    };
+  }
+}
+
+extension<Item extends Object> on Iterable<Item> {
+  Iterable<Item> modifyItemsRetroactively<Mod extends Object>({
+    required List<Mod> missedMods,
+    required Map<String, Item> cache0,
+    required String Function(Item e) itemId,
+    required ModConfig<Item, Mod> modConfig,
+  }) {
+    cache0 = {
+      ...cache0,
+      for (final e in this) itemId(e): e,
+    }.withMods(itemId: itemId, modConfig: modConfig, mods: missedMods);
+    return map((e) => cache0[itemId(e)]).nonNulls;
   }
 }
